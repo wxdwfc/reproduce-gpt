@@ -22,9 +22,18 @@ train_ratio = 0.9
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 #device = 'cpu'
 
+eval_iters = 200
+eval_interval = 1000
+
 data = encode(text)
 train_data = data[:int(len(text)*train_ratio)]
 val_data   = data[int(len(text)*train_ratio):]
+
+def get_batch_wrapper(split):
+    if split == "train":
+        return get_batch(train_data)
+    else:
+        return get_batch(val_data)
 
 def get_batch(data):
     ix = torch.randint(0, len(data) - block_size, (batch_size,))
@@ -32,6 +41,22 @@ def get_batch(data):
     y = torch.stack([torch.tensor(data[i+1:i+block_size+1], dtype = torch.long) for i in ix])    
     x,y = x.to(device),y.to(device)
     return x,y
+
+@torch.no_grad()
+def estimate_loss(model):
+    out = {}
+    model.eval() ## set the model to the evaluation phase
+
+    for split in ["train", "val"]:
+        losses = torch.zeros(eval_iters)
+        ## use some randomness to make the evaluation more accurate 
+        for k in range(eval_iters):
+            x,y = get_batch_wrapper(split)
+            logits, loss = model(x,y)
+            losses[k] = loss.item()
+        out[split] = losses.mean()
+    model.train() ## re-set back the model to the train phase
+    return out
 
 class BigramModel(nn.Module):
     def __init__(self, vocab_size, n_embd):
@@ -42,9 +67,17 @@ class BigramModel(nn.Module):
         ## Single-head attention
 #        self.sa_head = Head(n_embd)
 
-        ## Multi-head attention
+        """
+        ## Multi-head attention        
         self.sa_heads = MultiHeadAttention(4, int(n_embd / 4))
-
+        self.ffwd = FeedforwardNetwork(n_embd)
+        """
+        self.blocks = nn.Sequential(
+            Block(n_embd=n_embd,n_head=4),
+            Block(n_embd=n_embd,n_head=4),
+            Block(n_embd=n_embd,n_head=4),
+            nn.LayerNorm(n_embd)
+        )        
         self.lm_head = nn.Linear(n_embd, vocab_size)
         
     ## b: batch
@@ -57,7 +90,8 @@ class BigramModel(nn.Module):
         x_b_l_embd = out_b_l_embd + pos_emb_b_embd
 
         ## For now: the head size is the same as the embedding size
-        x_b_l_h = self.sa_heads(x_b_l_embd)
+#        x_b_l_h = self.sa_heads(x_b_l_embd)
+        x_b_l_h = self.blocks(x_b_l_embd)
         logits_b_l_embd = self.lm_head(x_b_l_h)
 
         loss = None
@@ -82,13 +116,31 @@ class BigramModel(nn.Module):
             
         return x_b_l
     
+class Block(nn.Module):
+    def __init__(self, n_embd, n_head)    :
+        super().__init__()
+        head_size = n_embd // n_head 
+        self.sa = MultiHeadAttention(n_head, head_size)
+        self.ffwd = FeedforwardNetwork(n_embd)
+
+        ## ln: layer normalization
+        self.ln1 = nn.LayerNorm(n_embd)
+        self.ln2 = nn.LayerNorm(n_embd)
+
+    def forward(self, x):
+        x = x + self.sa(self.ln1(x))
+        x = x + self.ffwd(self.ln2(x))
+        return x
+    
 class MultiHeadAttention(nn.Module):
     def __init__(self, num_heads, head_size):    
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+        self.proj = nn.Linear(n_embd, n_embd) ## kind of weird, should project head_size * num_heads to n_embd?
 
     def forward(self, x):
-        return torch.cat([head(x) for head in self.heads], dim=-1)
+        out = torch.cat([head(x) for head in self.heads], dim=-1)
+        return self.proj(out)
     
 class Head(nn.Module):
     def __init__(self, head_size):
@@ -111,6 +163,17 @@ class Head(nn.Module):
         v_b_t_h = self.value(x)
         return score_b_t_t @ v_b_t_h ## b_t_h
         
+class FeedforwardNetwork(nn.Module):
+    def __init__(self, embd_size):
+        super().__init__()
+        self.network = nn.Sequential(
+            nn.Linear(embd_size, 4 * embd_size),
+            nn.ReLU(),
+            nn.Linear(4 * embd_size, embd_size)            
+        )
+
+    def forward(self, x):
+        return self.network(x)
 
 def main():    
     train = True
@@ -124,7 +187,11 @@ def main():
         print("training started using device", device)
         start_time = time.time()
 
-        for steps in range(5000):
+        for step in range(5000):
+            if step % eval_interval == 0:
+                losses = estimate_loss(model)
+                print(f"Step {step}: train loss: {losses['train']}, val loss: {losses['val']}")
+
             xb,yb = get_batch(train_data)
 
             logits, loss = model(xb,yb)
@@ -132,8 +199,6 @@ def main():
             loss.backward()
             optimizer.step()    
 
-            if steps % 500 == 0:
-                print(loss.item())    
         
         end_time = time.time()
         elapsed_time = end_time - start_time
@@ -148,4 +213,4 @@ def main():
     
 
 if __name__ == "__main__":    
-    main()
+    main()  
