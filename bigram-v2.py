@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import time
 from torch.nn import functional as F
 
 with open('input.txt', 'r') as file:
@@ -15,9 +16,11 @@ decode = lambda x: ''.join([id2char[i] for i in x])
 
 vocab_size = len(chars)
 n_embd = 32
-batch_size = 4
+batch_size = 32
 block_size = 8
 train_ratio = 0.9
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+#device = 'cpu'
 
 data = encode(text)
 train_data = data[:int(len(text)*train_ratio)]
@@ -27,6 +30,7 @@ def get_batch(data):
     ix = torch.randint(0, len(data) - block_size, (batch_size,))
     x = torch.stack([torch.tensor(data[i:i+block_size],dtype = torch.long ) for i in ix])
     y = torch.stack([torch.tensor(data[i+1:i+block_size+1], dtype = torch.long) for i in ix])    
+    x,y = x.to(device),y.to(device)
     return x,y
 
 class BigramModel(nn.Module):
@@ -49,7 +53,7 @@ class BigramModel(nn.Module):
     def forward(self, input_b_l, target_b_1): 
         B,T = input_b_l.shape
         out_b_l_embd = self.embedding_table(input_b_l) # B, T, Embd
-        pos_emb_b_embd = self.position_embedding_table(torch.arange(T)) 
+        pos_emb_b_embd = self.position_embedding_table(torch.arange(T).to(device)) 
         x_b_l_embd = out_b_l_embd + pos_emb_b_embd
 
         ## For now: the head size is the same as the embedding size
@@ -112,11 +116,14 @@ def main():
     train = True
     print("init model")
     model = BigramModel(len(chars),n_embd)
+    model.to(device)
     
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
     if train:
-        print("training started")
+        print("training started using device", device)
+        start_time = time.time()
+
         for steps in range(5000):
             xb,yb = get_batch(train_data)
 
@@ -127,10 +134,14 @@ def main():
 
             if steps % 500 == 0:
                 print(loss.item())    
+        
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        print(f"Elapsed time: {elapsed_time} seconds")        
 
-    print("----- Train done -----")
+        print("----- Train done -----")
 
-    started_text_1_1 = torch.zeros(1,1, dtype=torch.long)
+    started_text_1_1 = torch.zeros((1,1), dtype=torch.long, device=device)
     g_text = model.generate(started_text_1_1, max_new_tokens=100)[0].tolist()
     print("Generated text: ", decode(g_text))    
 
