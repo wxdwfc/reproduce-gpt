@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import time
 from torch.nn import functional as F
+import argparse
 
 with open('input.txt', 'r') as file:
     text = file.read()
@@ -199,10 +200,19 @@ class FeedforwardNetwork(nn.Module):
         return self.network(x)
 
 def main():    
-    train = True
+    parser = argparse.ArgumentParser(description='Train or do some inference with a toy model.')
+    parser.add_argument('--train', type=bool, default=False, help='Whether train the model')
+    args = parser.parse_args()
+
+    train = args.train
+
     print("init model")
     model = BigramModel(len(chars),n_embd, n_layers=n_layer)
-    model.to(device)
+    if not train:
+        print("Load model from", model_name )
+        model.load_state_dict(torch.load(model_name ))
+
+    model.to(device)    
     
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
@@ -234,13 +244,14 @@ def main():
         print("----- Train done -----")
 
     started_text_1_1 = torch.zeros((1,1), dtype=torch.long, device=device)    
-    g_text = model.generate(started_text_1_1, max_new_tokens=100)[0].tolist()
-    print("Generated text: ", decode(g_text))    
+    g_text = model.generate(started_text_1_1, max_new_tokens=10_000)[0].tolist()
+    text = decode(g_text)
+    print("Generated text: ", text)    
 
     # Open a file in write mode ('w')
     with open(output_file_name, 'w') as file:
         # Write the string to the file
-        file.write(g_text)        
+        file.write(text)        
 
 if __name__ == "__main__":    
     main()  
