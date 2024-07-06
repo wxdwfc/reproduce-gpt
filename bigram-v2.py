@@ -15,11 +15,21 @@ encode = lambda x: [char2id[c] for c in x]
 decode = lambda x: ''.join([id2char[i] for i in x])
 
 vocab_size = len(chars)
-n_embd = 32
-batch_size = 32
-block_size = 8
+
+### Hyper parameters
+n_head = 6
+n_embd = 384
+n_layer = 6
+batch_size = 64
+block_size = 256
 train_ratio = 0.9
+dropout = 0.2
+max_iter = 5000
+learning_rate = 3e-4
+
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
+model_name = "shakespere.model"
+output_file_name = "out.txt"
 #device = 'cpu'
 
 eval_iters = 200
@@ -59,7 +69,7 @@ def estimate_loss(model):
     return out
 
 class BigramModel(nn.Module):
-    def __init__(self, vocab_size, n_embd):
+    def __init__(self, vocab_size, n_embd, n_layers):
         super().__init__()
         self.embedding_table = nn.Embedding(vocab_size, n_embd)
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
@@ -72,12 +82,18 @@ class BigramModel(nn.Module):
         self.sa_heads = MultiHeadAttention(4, int(n_embd / 4))
         self.ffwd = FeedforwardNetwork(n_embd)
         """
+        """
         self.blocks = nn.Sequential(
             Block(n_embd=n_embd,n_head=4),
             Block(n_embd=n_embd,n_head=4),
             Block(n_embd=n_embd,n_head=4),
             nn.LayerNorm(n_embd)
-        )        
+        )  
+        """      
+        self.blocks = nn.Sequential(
+            *[Block(n_embd=n_embd, n_head=n_head) for _ in range(n_layers)]
+        )
+        self.ln_f = nn.LayerNorm(n_embd)
         self.lm_head = nn.Linear(n_embd, vocab_size)
         
     ## b: batch
@@ -92,6 +108,7 @@ class BigramModel(nn.Module):
         ## For now: the head size is the same as the embedding size
 #        x_b_l_h = self.sa_heads(x_b_l_embd)
         x_b_l_h = self.blocks(x_b_l_embd)
+        x_b_l_h = self.ln_f(x_b_l_h)
         logits_b_l_embd = self.lm_head(x_b_l_h)
 
         loss = None
@@ -137,10 +154,12 @@ class MultiHeadAttention(nn.Module):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
         self.proj = nn.Linear(n_embd, n_embd) ## kind of weird, should project head_size * num_heads to n_embd?
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         out = torch.cat([head(x) for head in self.heads], dim=-1)
-        return self.proj(out)
+        out = self.proj(out)
+        return self.dropout(out)
     
 class Head(nn.Module):
     def __init__(self, head_size):
@@ -149,6 +168,8 @@ class Head(nn.Module):
         self.key = nn.Linear(n_embd, head_size,bias=False)
         self.value = nn.Linear(n_embd, head_size,bias=False)
         self.register_buffer("tril", torch.tril(torch.ones(block_size, block_size)))
+
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         B,T,C = x.shape 
@@ -159,6 +180,7 @@ class Head(nn.Module):
         wei_b_t_t = wei_b_t_t.masked_fill(self.tril[:T,:T] == 0, float('-inf'))
         wei_b_t_t /= C**0.5
         score_b_t_t = F.softmax(wei_b_t_t, dim=-1)
+        score_b_t_t = self.dropout(score_b_t_t)
 
         v_b_t_h = self.value(x)
         return score_b_t_t @ v_b_t_h ## b_t_h
@@ -169,7 +191,8 @@ class FeedforwardNetwork(nn.Module):
         self.network = nn.Sequential(
             nn.Linear(embd_size, 4 * embd_size),
             nn.ReLU(),
-            nn.Linear(4 * embd_size, embd_size)            
+            nn.Linear(4 * embd_size, embd_size),
+            nn.Dropout(dropout)            
         )
 
     def forward(self, x):
@@ -178,19 +201,23 @@ class FeedforwardNetwork(nn.Module):
 def main():    
     train = True
     print("init model")
-    model = BigramModel(len(chars),n_embd)
+    model = BigramModel(len(chars),n_embd, n_layers=n_layer)
     model.to(device)
     
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
     if train:
         print("training started using device", device)
         start_time = time.time()
 
-        for step in range(5000):
+        for step in range(max_iter):
             if step % eval_interval == 0:
                 losses = estimate_loss(model)
-                print(f"Step {step}: train loss: {losses['train']}, val loss: {losses['val']}")
+                end_time = time.time()  
+                elapsed_time = end_time - start_time
+
+                print(f"Step {step}: train loss: {losses['train']}, val loss: {losses['val']},  \
+                      elapsed time {elapsed_time}")                
 
             xb,yb = get_batch(train_data)
 
@@ -199,18 +226,21 @@ def main():
             loss.backward()
             optimizer.step()    
 
-        
-        end_time = time.time()
-        elapsed_time = end_time - start_time
-        print(f"Elapsed time: {elapsed_time} seconds")        
+
+        print("Save model to ",model_name)
+        torch.save(model.state_dict(), model_name)
+    
 
         print("----- Train done -----")
 
-    started_text_1_1 = torch.zeros((1,1), dtype=torch.long, device=device)
+    started_text_1_1 = torch.zeros((1,1), dtype=torch.long, device=device)    
     g_text = model.generate(started_text_1_1, max_new_tokens=100)[0].tolist()
     print("Generated text: ", decode(g_text))    
 
-    
+    # Open a file in write mode ('w')
+    with open(output_file_name, 'w') as file:
+        # Write the string to the file
+        file.write(g_text)        
 
 if __name__ == "__main__":    
     main()  
