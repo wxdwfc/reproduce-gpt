@@ -53,6 +53,15 @@ def get_batch(data):
     x,y = x.to(device),y.to(device)
     return x,y
 
+# Print the number of parameters in a nice way
+def format_params(num_params):
+    if num_params >= 1e9:
+        return f'{num_params / 1e9:.2f}B'
+    elif num_params >= 1e6:
+        return f'{num_params / 1e6:.2f}M'
+    else:
+        return f'{num_params}'
+
 @torch.no_grad()
 def estimate_loss(model):
     out = {}
@@ -208,6 +217,13 @@ def main():
 
     print("init model")
     model = BigramModel(len(chars),n_embd, n_layers=n_layer)
+
+
+    # Calculate the number of parameters
+    total_params = format_params(sum(p.numel() for p in model.parameters()))
+
+    print(f"The model has {total_params} parameters.")
+
     if not train:
         print("Load model from", model_name )
         model.load_state_dict(torch.load(model_name ))
